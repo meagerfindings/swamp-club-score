@@ -37,7 +37,7 @@ This extension is meant to be polled periodically and then consumed by:
 sensor:
   - platform: rest
     name: Swamp Club Score
-    resource: http://roccinante.local:8123/api/swamp-club-score
+    resource: http://homeassistant.local:8123/api/swamp-club-score
 ```
 
 ## Notes
