@@ -18,7 +18,7 @@ import { z } from "npm:zod@4";
 
 const GlobalArgsSchema = z.object({
   username: z.string().min(1).default("mgreten"),
-  swampClubUrl: z.string().url().default("https://swamp.club"),
+  swampClubUrl: z.string().url().default("https://swamp-club.com"),
 });
 
 type GlobalArgs = z.infer<typeof GlobalArgsSchema>;
@@ -30,6 +30,7 @@ type LeaderboardRow = {
   scoreLabel: string;
   tierName: string;
   tierScore: number;
+  tierOrdinal: number | null;
   isTargetUser: boolean;
 };
 
@@ -57,6 +58,9 @@ type Snapshot = {
   todayRank: number | null;
   tierName: string;
   tierScore: number;
+  tierOrdinal: number | null;
+  tierCount: number | null;
+  nextTierScore: number | null;
   activeDays: number | null;
   activeYear: number | null;
   streakDays: number | null;
@@ -73,6 +77,7 @@ const LeaderboardRowSchema = z.object({
   scoreLabel: z.string(),
   tierName: z.string(),
   tierScore: z.number(),
+  tierOrdinal: z.number().nullable(),
   isTargetUser: z.boolean(),
 });
 
@@ -100,6 +105,9 @@ const SnapshotSchema = z.object({
   todayRank: z.number().nullable(),
   tierName: z.string(),
   tierScore: z.number(),
+  tierOrdinal: z.number().nullable(),
+  tierCount: z.number().nullable(),
+  nextTierScore: z.number().nullable(),
   activeDays: z.number().nullable(),
   activeYear: z.number().nullable(),
   streakDays: z.number().nullable(),
@@ -166,6 +174,7 @@ function extractLeaderboardBoard(
     points?: number;
     tierName?: string;
     tierScore?: number;
+    tier?: { tierName?: string; ordinal?: number };
   }>;
 
   return {
@@ -178,8 +187,11 @@ function extractLeaderboardBoard(
         username: row.username ?? "",
         score: Number(row.score ?? row.pts ?? row.points ?? 0),
         scoreLabel: String(row.score ?? row.pts ?? row.points ?? 0),
-        tierName: String(row.tierName ?? ""),
+        tierName: String(row.tierName ?? row.tier?.tierName ?? ""),
         tierScore: Number(row.tierScore ?? 0),
+        tierOrdinal: typeof row.tier?.ordinal === "number"
+          ? row.tier.ordinal
+          : null,
         isTargetUser: row.username === targetUsername,
       }))
       .sort((a, b) => a.rank - b.rank),
@@ -208,6 +220,7 @@ function extractLeaderboardRow(
     scoreLabel,
     tierName,
     tierScore,
+    tierOrdinal: null,
     isTargetUser: username === targetUsername,
   };
 }
@@ -234,12 +247,62 @@ function parseTopBuckets(html: string): TopBucket[] {
   return buckets.sort((a, b) => b.score - a.score).slice(0, 10);
 }
 
+/**
+ * The profile's "Tier" section renders `aria-label="Tier N of M"` followed by
+ * Rank / Score / Next label-value pairs. Older pages used a bare heading and
+ * score div; that layout is still accepted as a fallback.
+ */
+function parseTierSection(html: string): {
+  tierName: string;
+  tierScore: number;
+  tierOrdinal: number | null;
+  tierCount: number | null;
+  nextTierScore: number | null;
+} {
+  const section = extractMatch(
+    html,
+    /<section aria-label="Tier">([\s\S]*?)<\/section>/,
+  );
+  if (section) {
+    const ordinal = section.match(/aria-label="Tier (\d+) of (\d+)"/);
+    const fields: Record<string, string> = {};
+    for (
+      const match of section.matchAll(
+        />(Rank|Score|Next)<\/div><div[^>]*>([^<]+)<\/div>/g,
+      )
+    ) {
+      fields[match[1]] = match[2].trim();
+    }
+    return {
+      tierName: fields.Rank ?? "",
+      tierScore: fields.Score ? parseCompactNumber(fields.Score) : 0,
+      tierOrdinal: ordinal ? Number(ordinal[1]) : null,
+      tierCount: ordinal ? Number(ordinal[2]) : null,
+      nextTierScore: fields.Next ? parseCompactNumber(fields.Next) : null,
+    };
+  }
+
+  const legacy = html.match(
+    /<div class="text-2xl font-bold text-white">\s*([^<]+?)\s*<\/div>[\s\S]*?<div class="font-mono text-hud-label text-white tabular-nums">([^<]+)<\/div>/,
+  );
+  return {
+    tierName: legacy?.[1]?.trim() ?? "",
+    tierScore: legacy ? parseCompactNumber(legacy[2]) : 0,
+    tierOrdinal: null,
+    tierCount: null,
+    nextTierScore: null,
+  };
+}
+
 function parseProfileHtml(html: string): {
   score: number;
   scoreLabel: string;
   rank: number | null;
   tierName: string;
   tierScore: number;
+  tierOrdinal: number | null;
+  tierCount: number | null;
+  nextTierScore: number | null;
   activeDays: number | null;
   activeYear: number | null;
   streakDays: number | null;
@@ -259,11 +322,7 @@ function parseProfileHtml(html: string): {
     /<span class="font-mono text-hud-micro uppercase tracking-\[0\.18em\] text-hud-muted tabular-nums">#?(\d+)<\/span>/,
   );
 
-  const tierMatch = html.match(
-    /<div class="text-2xl font-bold text-white">\s*([^<]+?)\s*<\/div>[\s\S]*?<div class="font-mono text-hud-label text-white tabular-nums">([^<]+)<\/div>/,
-  );
-  const tierName = tierMatch?.[1]?.trim() ?? "";
-  const tierScore = tierMatch ? parseCompactNumber(tierMatch[2]) : 0;
+  const tier = parseTierSection(html);
 
   const activeDaysMatch = html.match(/(\d+) active days in (\d{4})/);
   const activeDays = activeDaysMatch ? Number(activeDaysMatch[1]) : null;
@@ -279,8 +338,7 @@ function parseProfileHtml(html: string): {
     score,
     scoreLabel,
     rank: rank ?? null,
-    tierName,
-    tierScore,
+    ...tier,
     activeDays,
     activeYear,
     streakDays,
@@ -318,12 +376,19 @@ async function fetchJson(url: string): Promise<unknown> {
  */
 export const model = {
   type: "@mgreten/swamp-club-score",
-  version: "2026.07.31.1",
+  version: "2026.09.25.1",
   globalArguments: GlobalArgsSchema,
   upgrades: [{
     toVersion: "2026.07.31.1",
     description:
       "Expose lifetime and rolling-24-hour leaderboard values; no global argument schema changes",
+    upgradeAttributes: (
+      old: Record<string, unknown>,
+    ): Record<string, unknown> => old,
+  }, {
+    toVersion: "2026.09.25.1",
+    description:
+      "Parse the current tier layout and nested leaderboard tier; default to swamp-club.com; no global argument schema changes",
     upgradeAttributes: (
       old: Record<string, unknown>,
     ): Record<string, unknown> => old,
@@ -444,6 +509,8 @@ export const model = {
           snapshot.rank = alltimeTargetRow.rank;
           snapshot.tierName = alltimeTargetRow.tierName || snapshot.tierName;
           snapshot.tierScore = alltimeTargetRow.tierScore || snapshot.tierScore;
+          snapshot.tierOrdinal = snapshot.tierOrdinal ??
+            alltimeTargetRow.tierOrdinal;
         }
         if (todayTargetRow) {
           snapshot.todayScore = todayTargetRow.score;

@@ -262,3 +262,135 @@ Deno.test("sync rejects a missing today board without writes", async () => {
     server.shutdown();
   }
 });
+
+// Profile layout and leaderboard row shape served by swamp-club.com since
+// September 2026: a "Tier" section with Rank / Score / Next, and a nested
+// `tier` object on each leaderboard row instead of flat tierName/tierScore.
+const CURRENT_TIER_HTML = `
+<section aria-label="Tier"><div class="flex items-stretch gap-4"><div class="flex flex-col items-center"><div class="font-orbitron font-black text-5xl leading-none text-orange-400" aria-label="Tier 12 of 20">12</div><div class="font-mono text-hud-micro text-hud-muted mt-1.5 uppercase tracking-[0.18em]">of 20</div></div><div class="grid grid-cols-2 gap-x-4 gap-y-3 flex-1 min-w-0 self-center"><div class="col-span-2"><div class="font-mono text-hud-micro text-hud-muted uppercase tracking-[0.22em] mb-1">Rank</div><div class="font-mono text-base font-semibold uppercase tracking-[0.08em] text-orange-400">Bog Keeper</div></div><div><div class="font-mono text-hud-micro text-hud-muted uppercase tracking-[0.22em] mb-1">Score</div><div class="font-mono text-base text-white font-semibold tabular-nums">12,053,268</div></div><div><div class="font-mono text-hud-micro text-hud-muted uppercase tracking-[0.22em] mb-1">Next</div><div class="font-mono text-base text-[color:var(--profile-accent)] tabular-nums">25,000,000</div></div></div></div></section>
+<section aria-label="Extensions"></section>`;
+
+Deno.test("sync parses the current tier section and nested leaderboard tier", async () => {
+  const server = Deno.serve(
+    { hostname: "127.0.0.1", port: 0 },
+    (req: Request) => {
+      const url = new URL(req.url);
+      if (url.pathname === "/u/sntxrr") return new Response(CURRENT_TIER_HTML);
+      if (url.pathname === "/api/v1/leaderboard/locate") {
+        return Response.json({
+          boards: {
+            alltime: {
+              rows: [{
+                rank: 7,
+                username: "sntxrr",
+                score: 12053268,
+                tier: { tierName: "Bog Keeper", tier: 4, ordinal: 12 },
+                isMatch: true,
+              }],
+            },
+            today: {
+              rows: [{
+                rank: 4,
+                username: "sntxrr",
+                score: 213953,
+                tier: { tierName: "Bog Keeper", tier: 4, ordinal: 12 },
+                isMatch: true,
+              }],
+            },
+          },
+        });
+      }
+      return new Response("not found", { status: 404 });
+    },
+  );
+  const port = (server.addr as Deno.NetAddr).port;
+  const writes: Array<{ specName: string; data: unknown }> = [];
+
+  try {
+    await model.methods.sync.execute({}, {
+      globalArgs: {
+        username: "sntxrr",
+        swampClubUrl: `http://127.0.0.1:${port}`,
+      },
+      logger: { info: () => {}, warning: () => {} },
+      writeResource: (specName, _instanceName, data) => {
+        writes.push({ specName, data });
+        return Promise.resolve({ name: specName });
+      },
+    });
+
+    const snapshot = writes[0].data as {
+      tierName: string;
+      tierScore: number;
+      tierOrdinal: number | null;
+      tierCount: number | null;
+      nextTierScore: number | null;
+      leaderboards: Record<
+        string,
+        { rows: Array<{ tierName: string; tierOrdinal: number | null }> }
+      >;
+    };
+    assertEquals(snapshot.tierName, "Bog Keeper");
+    assertEquals(snapshot.tierScore, 12053268);
+    assertEquals(snapshot.tierOrdinal, 12);
+    assertEquals(snapshot.tierCount, 20);
+    assertEquals(snapshot.nextTierScore, 25000000);
+    assertEquals(snapshot.leaderboards.alltime.rows[0].tierName, "Bog Keeper");
+    assertEquals(snapshot.leaderboards.alltime.rows[0].tierOrdinal, 12);
+  } finally {
+    server.shutdown();
+  }
+});
+
+Deno.test("sync takes the tier from the leaderboard when the page has none", async () => {
+  const server = Deno.serve(
+    { hostname: "127.0.0.1", port: 0 },
+    (req: Request) => {
+      const url = new URL(req.url);
+      if (url.pathname === "/u/sntxrr") return new Response("<html></html>");
+      if (url.pathname === "/api/v1/leaderboard/locate") {
+        return Response.json({
+          boards: {
+            alltime: {
+              rows: [{
+                rank: 7,
+                username: "sntxrr",
+                score: 12053268,
+                tier: { tierName: "Bog Keeper", ordinal: 12 },
+              }],
+            },
+            today: { rows: [] },
+          },
+        });
+      }
+      return new Response("not found", { status: 404 });
+    },
+  );
+  const port = (server.addr as Deno.NetAddr).port;
+  const writes: Array<{ specName: string; data: unknown }> = [];
+
+  try {
+    await model.methods.sync.execute({}, {
+      globalArgs: {
+        username: "sntxrr",
+        swampClubUrl: `http://127.0.0.1:${port}`,
+      },
+      logger: { info: () => {}, warning: () => {} },
+      writeResource: (specName, _instanceName, data) => {
+        writes.push({ specName, data });
+        return Promise.resolve({ name: specName });
+      },
+    });
+
+    const snapshot = writes[0].data as {
+      tierName: string;
+      tierOrdinal: number | null;
+      nextTierScore: number | null;
+    };
+    assertEquals(snapshot.tierName, "Bog Keeper");
+    assertEquals(snapshot.tierOrdinal, 12);
+    assertEquals(snapshot.nextTierScore, null);
+  } finally {
+    server.shutdown();
+  }
+});
