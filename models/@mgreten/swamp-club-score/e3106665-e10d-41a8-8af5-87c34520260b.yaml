@@ -1,0 +1,9 @@
+type: '@mgreten/swamp-club-score'
+typeVersion: 2026.07.31.1
+id: e3106665-e10d-41a8-8af5-87c34520260b
+name: swamp-club-score
+version: 1
+tags: {}
+globalArguments:
+  username: mgreten
+methods: {}
